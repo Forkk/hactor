@@ -1,9 +1,9 @@
+{-# LANGUAGE Rank2Types #-}
 module Control.Concurrent.Actor (
-    Actor(..)
-   ,ActorRef
+    Actor
+   ,Address
    ,ActorM
    ,send
-   ,self
    ,receive
    ,receiveWithTimeout
    ,spawn
@@ -17,36 +17,51 @@ import Control.Concurrent.Chan
 import Control.Monad.Reader
 import System.Timeout
 
-newtype ActorRef a = ActR { mbox :: Chan a }
 
-newActorRef :: IO (ActorRef a)
-newActorRef = liftM ActR newChan
+data Dialog a b = Dia 
+  { message :: a 
+  , address :: Address b a
+  }
 
-type ActorM a = ReaderT (ActorRef a) IO
+diaToPair :: Dialog a b -> (a, Address b a)
+diaToPair d = (message d, address d)
 
-type Actor a = ActorM a ()
+newtype Address a b = Addr { unAddr :: Dialog a b -> IO () }
 
-send :: ActorRef a -> a -> IO ()
-send act x = writeChan (mbox act) x
+newtype Mailbox a b = Mbox { unMbox :: Chan (Dialog a b) }
 
-receive :: ActorM a a
-receive = asks mbox >>= (liftIO . readChan)
+type ActorM a b = ReaderT (Mailbox a b) IO 
 
-receiveWithTimeout :: Int -> ActorM a (Maybe a)
-receiveWithTimeout n = asks mbox >>= (liftIO . timeout n . readChan)
+type Actor a b = ActorM a b ()
 
-self :: ActorM a (ActorRef a)
-self = ask
+receive :: ActorM a b (a, Address b a)
+receive = do
+    chan <- asks unMbox 
+    let pair = liftM diaToPair $ readChan chan
+    liftIO pair
 
-(▷) :: a -> ActorRef a -> IO ()
+receiveWithTimeout :: Int -> ActorM a b (Maybe (a, Address b a))
+receiveWithTimeout n = do 
+   chan <- asks unMbox 
+   let mpair = timeout n . liftM diaToPair $ readChan chan
+   liftIO mpair
+
+send :: Address a b -> a -> ActorM b a ()
+send addr msg = do
+    chan <- asks unMbox 
+    let self = Addr $ writeChan chan
+    liftIO $ unAddr addr (Dia msg self)
+    
+
+(▷) :: a -> Address a b -> ActorM b a ()
 (▷) = flip send
 
-(◁) :: ActorRef a -> a -> IO ()
+(◁) :: Address a b -> a -> ActorM b a ()
 (◁) = send
 
-spawn :: Actor a -> IO (ActorRef a)
+spawn :: Actor a b -> IO (Address a b)
 spawn act = do
-    ref <- newActorRef :: IO (ActorRef a)
-    forkIO $ runReaderT act ref
-    return ref
+    chan <- liftIO newChan
+    forkIO $ runReaderT act (Mbox chan)
+    return $ Addr (writeChan chan)
     
