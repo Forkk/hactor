@@ -11,8 +11,7 @@ module Control.Concurrent.Actor (
    ,(◁)
   ) where
 
-import Control.Concurrent (ThreadId, forkIO)
-import Control.Monad (void, liftM)
+import Control.Concurrent (forkIO)
 import Control.Concurrent.Chan
 import Control.Monad.Reader
 import System.Timeout
