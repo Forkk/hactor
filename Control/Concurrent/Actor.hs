@@ -15,13 +15,14 @@
 -- Here is an example:
 --
 -- @
---act1 :: Actor Int Int
+--act1 :: Actor 
 --act1 = forever $ do
---    (num, addr) <- receive
+--    msg <- receive
+--    me <- self
 --    liftIO . putStrLn $ \"act1: received \" ++ (show num)
---    send addr (num + 1)
+--    send addr (me, num + 1)
 --
---act2 :: Int -> Address Int Int -> Actor Int Int
+--act2 :: Int -> Address -> Actor 
 --act2 n0 addr = do
 --    send addr n0
 --    forever $ do
@@ -35,9 +36,12 @@
 --    threadDelay 20000000
 -- @
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE ExistentialQuantification #-}
 module Control.Concurrent.Actor (
   -- * Types
     Address
+  , Message
+  , Handler(..)
   , ActorM
   , Actor
   , ActorException
@@ -45,8 +49,10 @@ module Control.Concurrent.Actor (
   , send
   , (◁)
   , (▷)
+  , self
   , receive
   , receiveWithTimeout
+  , handle
   , spawn
   , monitor
   , link
@@ -62,8 +68,8 @@ import Control.Exception
   , SomeException
   , catches
   , throwTo
-  , Handler(..)
   )
+import qualified Control.Exception as E (Handler(..))
 import Control.Concurrent.Chan 
   ( Chan
   , newChan
@@ -80,10 +86,11 @@ import Control.Monad.Reader
   ( ReaderT
   , runReaderT
   , asks
+  , ask
   , liftIO
   )
-import Control.Monad (liftM)
 import System.Timeout (timeout)
+import Data.Dynamic
 import Data.Set 
   ( Set
   , empty
@@ -91,8 +98,6 @@ import Data.Set
   , delete
   , elems
   )
-import Data.Typeable (Typeable)
-
 
 -- | Exception raised by an actor on exit
 data ActorException = ActorException ThreadId (Maybe SomeException) 
@@ -100,87 +105,82 @@ data ActorException = ActorException ThreadId (Maybe SomeException)
 
 instance Exception ActorException
 
-data Dialog a b = Dia 
-  { message :: a 
-  , address :: Address b a
+type Message = Dynamic
+
+-- | The address of an actor, used to send messages 
+data Address = Addr 
+  { thId  :: ThreadId
+  , ctxt  :: Context
   }
 
-diaToPair :: Dialog a b -> (a, Address b a)
-diaToPair d = (message d, address d)
+instance Eq Address where
+    addr1 == addr2 = (thId addr1) == (thId addr2)
 
--- | The address of an actor that accepts messages of
--- type /a/ and sends messages of type /b/ 
-data Address a b = Addr 
-  { aTId  :: ThreadId
-  , aMVar :: MVar (Set ThreadId)
-  , aChan :: Chan (Dialog a b) 
-  }
-
-instance Eq (Address a b) where
-    addr1 == addr2 = (aTId addr1) == (aTId addr2)
-
-data Context a b = Ctxt 
-  { cMVar :: MVar (Set ThreadId)
-  , cChan :: Chan (Dialog a b)
+data Context = Ctxt 
+  { mVar :: MVar (Set ThreadId)
+  , chan :: Chan Message
   }
 
 -- | The actor monad, just a reader monad on top of 'IO'.
--- It carries information about an actor's mailbox, which is
--- hidden from the library's users.
-type ActorM a b = ReaderT (Context a b) IO 
+type ActorM = ReaderT Context IO 
 
--- | The type of an actor accepting messages of type /a/ and
--- returning messages of type /b/. It is just a monadic action
+-- | The type of an actor. It is just a monadic action
 -- in the 'ActorM' monad, returning ()
-type Actor a b = ActorM a b ()
+type Actor = ActorM ()
 
+data Handler = forall m . (Typeable m) => Handler (m -> ActorM ())
 
-self :: ActorM a b (Address a b)
+-- | Used to obtain an actor's own address inside the actor
+self :: ActorM Address
 self = do
-    ch <- asks cChan
-    mv <- asks cMVar
-    ti <- liftIO myThreadId
-    return $ Addr ti mv ch
+    c <- ask
+    i <- liftIO myThreadId
+    return $ Addr i c
 
 -- | Receive a message inside the 'ActorM' monad. Blocks until
 -- a message arrives if the mailbox is empty
-receive :: ActorM a b (a, Address b a)
+receive :: ActorM Message
 receive = do
-    ch <- asks cChan
-    let pair = liftM diaToPair $ readChan ch
-    liftIO pair
+    ch <- asks chan
+    liftIO . readChan $ ch
+    
 
 -- | Same as receive, but times out after a specified 
 -- amount of time and returns 'Nothing'
-receiveWithTimeout :: Int -> ActorM a b (Maybe (a, Address b a))
+receiveWithTimeout :: Int -> ActorM (Maybe Message)
 receiveWithTimeout n = do 
-   ch <- asks cChan 
-   let mpair = timeout n . liftM diaToPair $ readChan ch
-   liftIO mpair
+    ch <- asks chan 
+    liftIO . timeout n . readChan $ ch
+
+handle :: [Handler] -> Message -> ActorM ()
+handle hs msg = mapM_ (exec msg) hs where
+    exec m (Handler hdl) = case fromDynamic m of
+        Just m' -> hdl m'
+        Nothing -> return ()
 
 -- | Sends a message from inside the 'ActorM' monad
-send :: Address a b -> a -> ActorM b a ()
+send :: Address -> Message -> ActorM ()
 send addr msg = do
-    me <- self 
-    let ch = aChan addr
-    liftIO $ writeChan ch (Dia msg me)
+    let ch = chan . ctxt $ addr
+    liftIO . writeChan ch $ msg
 
 -- | Infix form of 'send'
-(◁) :: Address a b -> a -> ActorM b a ()
+(◁) :: Address -> Message -> ActorM ()
 (◁) = send
     
 -- | Infix form of 'send' with the arguments flipped
-(▷) :: a -> Address a b -> ActorM b a ()
+(▷) :: Message -> Address -> ActorM ()
 (▷) = flip send
 
 -- | Spawns a new actor
-spawn :: Actor a b -> IO (Address a b)
+spawn :: Actor -> IO Address
 spawn act = do
     ch <- liftIO newChan
     mv <- newMVar empty
-    let orig = runReaderT act (Ctxt mv ch)
+    let cx = Ctxt mv ch
+    let orig = runReaderT act cx
         wrap = do
-            orig `catches` [Handler actorExH, Handler someExH]
+            orig `catches` [E.Handler actorExH, E.Handler someExH]
             me <- myThreadId
             forward (ActorException me Nothing) 
         actorExH :: ActorException -> IO ()
@@ -193,11 +193,12 @@ spawn act = do
         someExH e = do
             me  <- myThreadId
             forward (ActorException me (Just e))
+        forward :: ActorException -> IO ()
         forward e = do
             lset <- withMVar mv return
             mapM_ (flip throwTo $ e) (elems lset)
     ti <- forkIO wrap
-    return $ Addr ti mv ch
+    return $ Addr ti cx
 
 -- | Monitors the actor at the specified address.
 -- If an exception is raised in the monitored actor's 
@@ -205,16 +206,16 @@ spawn act = do
 -- forwarded to the monitoring actor. If the monitored
 -- actor terminates, an 'ActorException' is raised in
 -- the monitoring Actor
-monitor :: Address a b -> ActorM c d ()
+monitor :: Address -> ActorM ()
 monitor addr = do
     me <- liftIO myThreadId
-    let mv = aMVar addr
-    liftIO $ modifyMVar_ mv (\set -> return $ insert me set)
+    let mv = mVar. ctxt $ addr
+    liftIO $ modifyMVar_ mv (return . insert me)
 
 -- | Like `monitor`, but bi-directional
-link :: Address a b -> ActorM c d ()
+link :: Address -> ActorM ()
 link addr = do
     monitor addr
-    mv <- asks cMVar
-    let ti = aTId addr
-    liftIO $ modifyMVar_ mv (\set -> return $ insert ti set)
+    mv <- asks mVar
+    let ti = thId addr
+    liftIO $ modifyMVar_ mv (return . insert ti)
