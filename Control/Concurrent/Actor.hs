@@ -152,11 +152,15 @@ receiveWithTimeout n = do
     ch <- asks chan 
     liftIO . timeout n . readChan $ ch
 
+-- | Try to handle a message using a list of handlers.
+-- The first handler matching the type of the message 
+-- is used.
 handle :: [Handler] -> Message -> ActorM ()
-handle hs msg = mapM_ (exec msg) hs where
-    exec m (Handler hdl) = case fromDynamic m of
-        Just m' -> hdl m'
-        Nothing -> return ()
+handle hs msg = go hs where
+    go [] = return ()
+    go ((Handler h):hs') = case fromDynamic msg of
+        Just m' -> h m'
+        Nothing -> go hs'
 
 -- | Sends a message from inside the 'ActorM' monad
 send :: Address -> Message -> ActorM ()
