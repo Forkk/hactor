@@ -107,7 +107,7 @@ data ActorExitNormal = ActorExitNormal deriving (Typeable, Show)
 
 instance Exception ActorExitNormal
 
-data RemoteException = RemoteException ThreadId SomeException
+data RemoteException = RemoteException Address SomeException
   deriving (Typeable, Show)
 
 instance Exception RemoteException
@@ -119,6 +119,9 @@ data Address = Addr
   { thId  :: ThreadId
   , ctxt  :: Context
   }
+
+instance Show Address where
+    show (Addr ti _) = "Address(" ++ (show ti) ++ ")"
 
 instance Eq Address where
     addr1 == addr2 = (thId addr1) == (thId addr2)
@@ -193,15 +196,15 @@ spawn act = do
     let orig = runReaderT act cx >> throwIO ActorExitNormal
         wrap = orig `catches` [E.Handler remoteExH, E.Handler someExH]
         remoteExH :: RemoteException -> IO ()
-        remoteExH e@(RemoteException ti _) = do
-            modifyMVar_ mv (\set -> return $ delete ti set)
-            me  <- myThreadId
+        remoteExH e@(RemoteException a _) = do
+            modifyMVar_ mv (\set -> return $ delete (thId a) set)
+            me  <- myThreadId 
             let se = toException e
-            forward (RemoteException me se)
+            forward (RemoteException (Addr me cx) se)
         someExH :: SomeException -> IO ()
         someExH e = do
             me  <- myThreadId
-            forward (RemoteException me e)
+            forward (RemoteException (Addr me cx) e)
         forward :: RemoteException -> IO ()
         forward e = do
             lset <- withMVar mv return
