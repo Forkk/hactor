@@ -44,7 +44,8 @@ module Control.Concurrent.Actor (
   , Handler(..)
   , ActorM
   , Actor
-  , ActorException
+  , RemoteException
+  , ActorExitNormal
   -- * Actor actions
   , send
   , (◁)
@@ -68,6 +69,8 @@ import Control.Exception
   , SomeException
   , catches
   , throwTo
+  , throwIO
+  , PatternMatchFail(..)
   )
 import qualified Control.Exception as E (Handler(..))
 import Control.Concurrent.Chan 
@@ -100,10 +103,14 @@ import Data.Set
   )
 
 -- | Exception raised by an actor on exit
-data ActorException = ActorException ThreadId (Maybe SomeException) 
+data ActorExitNormal = ActorExitNormal deriving (Typeable, Show)
+
+instance Exception ActorExitNormal
+
+data RemoteException = RemoteException ThreadId SomeException
   deriving (Typeable, Show)
 
-instance Exception ActorException
+instance Exception RemoteException
 
 type Message = Dynamic
 
@@ -157,7 +164,8 @@ receiveWithTimeout n = do
 -- is used.
 handle :: [Handler] -> Message -> ActorM ()
 handle hs msg = go hs where
-    go [] = return ()
+    go [] = liftIO . throwIO $ PatternMatchFail errmsg where
+        errmsg = "no handler for messages of type " ++ (show . typeOf $ msg)
     go ((Handler h):hs') = case fromDynamic msg of
         Just m' -> h m'
         Nothing -> go hs'
@@ -182,22 +190,19 @@ spawn act = do
     ch <- liftIO newChan
     mv <- newMVar empty
     let cx = Ctxt mv ch
-    let orig = runReaderT act cx
-        wrap = do
-            orig `catches` [E.Handler actorExH, E.Handler someExH]
-            me <- myThreadId
-            forward (ActorException me Nothing) 
-        actorExH :: ActorException -> IO ()
-        actorExH e@(ActorException ti _) = do
+    let orig = runReaderT act cx >> throwIO ActorExitNormal
+        wrap = orig `catches` [E.Handler remoteExH, E.Handler someExH]
+        remoteExH :: RemoteException -> IO ()
+        remoteExH e@(RemoteException ti _) = do
             modifyMVar_ mv (\set -> return $ delete ti set)
             me  <- myThreadId
             let se = toException e
-            forward (ActorException me (Just se))
+            forward (RemoteException me se)
         someExH :: SomeException -> IO ()
         someExH e = do
             me  <- myThreadId
-            forward (ActorException me (Just e))
-        forward :: ActorException -> IO ()
+            forward (RemoteException me e)
+        forward :: RemoteException -> IO ()
         forward e = do
             lset <- withMVar mv return
             mapM_ (flip throwTo $ e) (elems lset)
