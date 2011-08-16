@@ -57,6 +57,10 @@ module Control.Concurrent.Actor (
   , spawn
   , monitor
   , link
+  , setFlag
+  , clearFlag
+  , toggleFlag
+  , testFlag
   ) where
 
 import Control.Concurrent 
@@ -101,6 +105,13 @@ import Data.Set
   , delete
   , elems
   )
+import Data.Word (Word64)
+import Data.Bits (
+    setBit
+  , clearBit
+  , complementBit
+  , testBit
+  )
 
 -- | Exception raised by an actor on exit
 data ActorExitNormal = ActorExitNormal deriving (Typeable, Show)
@@ -126,9 +137,33 @@ instance Show Address where
 instance Eq Address where
     addr1 == addr2 = (thId addr1) == (thId addr2)
 
+instance Ord Address where
+    addr1 `compare` addr2 = (thId addr1) `compare` (thId addr2)
+
+type Flags = Word64
+
+data Flag = TrapRemoteExceptions
+    deriving (Eq, Enum)
+
+defaultFlags :: [Flag]
+defaultFlags = []
+
+setF :: Flag -> Flags -> Flags
+setF = flip setBit . fromEnum
+
+clearF :: Flag -> Flags -> Flags
+clearF = flip clearBit . fromEnum
+
+toggleF :: Flag -> Flags -> Flags
+toggleF = flip complementBit . fromEnum
+
+isSetF :: Flag -> Flags -> Bool
+isSetF = flip testBit . fromEnum
+
 data Context = Ctxt 
-  { mVar :: MVar (Set ThreadId)
-  , chan :: Chan Message
+  { lSet  :: MVar (Set Address)
+  , chan  :: Chan Message
+  , flags :: MVar Flags
   }
 
 -- | The actor monad, just a reader monad on top of 'IO'.
@@ -187,17 +222,18 @@ send addr msg = do
 (▷) :: Message -> Address -> ActorM ()
 (▷) = flip send
 
--- | Spawns a new actor
-spawn :: Actor -> IO Address
-spawn act = do
+-- | Spawns a new actor, with the given flags set
+spawn' :: [Flag] -> Actor -> IO Address
+spawn' fs act = do
     ch <- liftIO newChan
-    mv <- newMVar empty
-    let cx = Ctxt mv ch
+    ls <- newMVar empty
+    fl <- newMVar $ foldl (flip setF) 0x00 fs
+    let cx = Ctxt ls ch fl
     let orig = runReaderT act cx >> throwIO ActorExitNormal
         wrap = orig `catches` [E.Handler remoteExH, E.Handler someExH]
         remoteExH :: RemoteException -> IO ()
         remoteExH e@(RemoteException a _) = do
-            modifyMVar_ mv (\set -> return $ delete (thId a) set)
+            modifyMVar_ ls (return . delete a)
             me  <- myThreadId 
             let se = toException e
             forward (RemoteException (Addr me cx) se)
@@ -207,10 +243,14 @@ spawn act = do
             forward (RemoteException (Addr me cx) e)
         forward :: RemoteException -> IO ()
         forward e = do
-            lset <- withMVar mv return
-            mapM_ (flip throwTo $ e) (elems lset)
+            lset <- withMVar ls return
+            mapM_ (($ e) . throwTo . thId) $ elems lset
     ti <- forkIO wrap
     return $ Addr ti cx
+
+-- | Spawn a new actor with default flags
+spawn :: Actor -> IO Address
+spawn = spawn' defaultFlags 
 
 -- | Monitors the actor at the specified address.
 -- If an exception is raised in the monitored actor's 
@@ -220,14 +260,36 @@ spawn act = do
 -- the monitoring Actor
 monitor :: Address -> ActorM ()
 monitor addr = do
-    me <- liftIO myThreadId
-    let mv = mVar. ctxt $ addr
-    liftIO $ modifyMVar_ mv (return . insert me)
+    me <- self
+    let ls = lSet. ctxt $ addr
+    liftIO $ modifyMVar_ ls (return . insert me)
 
 -- | Like `monitor`, but bi-directional
 link :: Address -> ActorM ()
 link addr = do
     monitor addr
-    mv <- asks mVar
-    let ti = thId addr
-    liftIO $ modifyMVar_ mv (return . insert ti)
+    ls <- asks lSet
+    liftIO $ modifyMVar_ ls (return . insert addr)
+
+-- | Sets the specified flag in the actor's environment
+setFlag :: Flag -> ActorM ()
+setFlag flag = do
+    fs <- asks flags
+    liftIO $ modifyMVar_ fs (return . setF flag)
+
+-- | Clears the specified flag in the actor's environment
+clearFlag :: Flag -> ActorM ()
+clearFlag flag = do
+    fs <- asks flags
+    liftIO $ modifyMVar_ fs (return . clearF flag)
+
+-- | Toggles the specified flag in the actor's environment
+toggleFlag :: Flag -> ActorM ()
+toggleFlag flag = do
+    fs <- asks flags
+    liftIO $ modifyMVar_ fs (return . toggleF flag)
+
+testFlag :: Flag -> ActorM Bool
+testFlag flag = do 
+    fs <- asks flags
+    liftIO $ withMVar fs (return . isSetF flag)
