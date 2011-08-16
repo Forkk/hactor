@@ -242,9 +242,19 @@ spawn' fs act = do
             me  <- myThreadId
             forward (RemoteException (Addr me cx) e)
         forward :: RemoteException -> IO ()
-        forward e = do
+        forward ex = do
             lset <- withMVar ls return
-            mapM_ (($ e) . throwTo . thId) $ elems lset
+            mapM_ (fwdaux ex) $ elems lset
+        fwdaux :: RemoteException -> Address -> IO ()
+        fwdaux ex addr = do
+            let rfs = flags . ctxt $ addr
+                rch = chan  . ctxt $ addr
+            trap <- withMVar rfs (return . isSetF TrapRemoteExceptions)
+            if trap
+                then
+                    writeChan rch (toDyn ex)
+                else
+                    throwTo (thId addr) ex
     ti <- forkIO wrap
     return $ Addr ti cx
 
@@ -261,7 +271,7 @@ spawn = spawn' defaultFlags
 monitor :: Address -> ActorM ()
 monitor addr = do
     me <- self
-    let ls = lSet. ctxt $ addr
+    let ls = lSet . ctxt $ addr
     liftIO $ modifyMVar_ ls (return . insert me)
 
 -- | Like `monitor`, but bi-directional
@@ -289,6 +299,7 @@ toggleFlag flag = do
     fs <- asks flags
     liftIO $ modifyMVar_ fs (return . toggleF flag)
 
+-- | Checks if the specified flag is set in the actor's environment
 testFlag :: Flag -> ActorM Bool
 testFlag flag = do 
     fs <- asks flags
