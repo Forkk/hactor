@@ -40,12 +40,12 @@
 module Control.Concurrent.Actor (
   -- * Types
     Address
-  , Message
   , Handler(..)
   , ActorM
   , Actor
   , RemoteException
   , ActorExitNormal
+  , Flag(..)
   -- * Actor actions
   , send
   , (◁)
@@ -53,7 +53,6 @@ module Control.Concurrent.Actor (
   , self
   , receive
   , receiveWithTimeout
-  , handle
   , spawn
   , monitor
   , link
@@ -123,23 +122,6 @@ data RemoteException = RemoteException Address SomeException
 
 instance Exception RemoteException
 
-type Message = Dynamic
-
--- | The address of an actor, used to send messages 
-data Address = Addr 
-  { thId  :: ThreadId
-  , ctxt  :: Context
-  }
-
-instance Show Address where
-    show (Addr ti _) = "Address(" ++ (show ti) ++ ")"
-
-instance Eq Address where
-    addr1 == addr2 = (thId addr1) == (thId addr2)
-
-instance Ord Address where
-    addr1 `compare` addr2 = (thId addr1) `compare` (thId addr2)
-
 type Flags = Word64
 
 data Flag = TrapRemoteExceptions
@@ -164,7 +146,24 @@ data Context = Ctxt
   { lSet  :: MVar (Set Address)
   , chan  :: Chan Message
   , flags :: MVar Flags
-  }
+  } deriving (Typeable)
+
+type Message = Dynamic
+
+-- | The address of an actor, used to send messages 
+data Address = Addr 
+  { thId  :: ThreadId
+  , ctxt  :: Context
+  } deriving (Typeable)
+
+instance Show Address where
+    show (Addr ti _) = "Address(" ++ (show ti) ++ ")"
+
+instance Eq Address where
+    addr1 == addr2 = (thId addr1) == (thId addr2)
+
+instance Ord Address where
+    addr1 `compare` addr2 = (thId addr1) `compare` (thId addr2)
 
 -- | The actor monad, just a reader monad on top of 'IO'.
 type ActorM = ReaderT Context IO 
@@ -182,44 +181,45 @@ self = do
     i <- liftIO myThreadId
     return $ Addr i c
 
--- | Receive a message inside the 'ActorM' monad. Blocks until
--- a message arrives if the mailbox is empty
-receive :: ActorM Message
-receive = do
-    ch <- asks chan
-    liftIO . readChan $ ch
-    
-
--- | Same as receive, but times out after a specified 
--- amount of time and returns 'Nothing'
-receiveWithTimeout :: Int -> ActorM (Maybe Message)
-receiveWithTimeout n = do 
-    ch <- asks chan 
-    liftIO . timeout n . readChan $ ch
-
 -- | Try to handle a message using a list of handlers.
 -- The first handler matching the type of the message 
 -- is used.
-handle :: [Handler] -> Message -> ActorM ()
-handle hs msg = go hs where
-    go [] = liftIO . throwIO $ PatternMatchFail errmsg where
-        errmsg = "no handler for messages of type " ++ (show . typeOf $ msg)
-    go ((Handler h):hs') = case fromDynamic msg of
-        Just m' -> h m'
-        Nothing -> go hs'
+receive :: [Handler] -> ActorM ()
+receive hs = do
+    ch  <- asks chan
+    msg <- liftIO . readChan $ ch 
+    rec msg hs
+
+-- | Same as receive, but times out after a specified 
+-- amount of time and runs a default action
+receiveWithTimeout :: Int -> [Handler] -> ActorM () -> ActorM ()
+receiveWithTimeout n hs act = do 
+    ch <- asks chan 
+    msg <- liftIO . timeout n . readChan $ ch
+    case msg of
+        Just m  -> rec m hs
+        Nothing -> act
+
+rec :: Message -> [Handler] -> ActorM ()
+rec msg [] = liftIO . throwIO $ PatternMatchFail err where
+    err = "no handler for messages of type " ++ (show . typeOf $ msg)
+rec msg ((Handler hdl):hs) = case fromDynamic msg of
+    Just m  -> hdl m
+    Nothing -> rec msg hs
+
 
 -- | Sends a message from inside the 'ActorM' monad
-send :: Address -> Message -> ActorM ()
+send :: Typeable m => Address -> m -> ActorM ()
 send addr msg = do
     let ch = chan . ctxt $ addr
-    liftIO . writeChan ch $ msg
+    liftIO . writeChan ch . toDyn $ msg
 
 -- | Infix form of 'send'
-(◁) :: Address -> Message -> ActorM ()
+(◁) :: Typeable m => Address -> m -> ActorM ()
 (◁) = send
     
 -- | Infix form of 'send' with the arguments flipped
-(▷) :: Message -> Address -> ActorM ()
+(▷) :: Typeable m => m -> Address -> ActorM ()
 (▷) = flip send
 
 -- | Spawns a new actor, with the given flags set
