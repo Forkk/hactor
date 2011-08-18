@@ -15,25 +15,51 @@
 -- Here is an example:
 --
 -- @
---act1 :: Actor 
---act1 = forever $ do
---    msg <- receive
---    me <- self
---    liftIO . putStrLn $ \"act1: received \" ++ (show num)
---    send addr (me, num + 1)
---
---act2 :: Int -> Address -> Actor 
---act2 n0 addr = do
---    send addr n0
---    forever $ do
---        (num, addr1) <- receive
---        liftIO . putStrLn $ \"act2: received \" ++ (show num)
---        send addr1 (num + 1)
---
---main = do
---    addr1 <- spawn act1
---    addr2 <- spawn $ act2 0 addr1
---    threadDelay 20000000
+-- act1 :: Actor
+-- act1 = do
+--     me <- self
+--     liftIO $ print "act1 started"
+--     forever $ receive
+--       [ Case $ \((n, a) :: (Int, Address)) ->
+--             if n > 10000
+--                 then do
+--                     liftIO . throwIO $ NonTermination 
+--                 else do
+--                     liftIO . putStrLn $ "act1 got " ++ (show n) ++ " from " ++ (show a)
+--                     a ◁ (n+1, me)
+--       , Case $ \(e :: RemoteException) -> 
+--             liftIO . print $ "act1 received a remote exception"
+--       , Default $ liftIO . print $ "act1: received a malformed message"
+--       ]
+--     
+-- act2 :: Address -> Actor
+-- act2 addr = do
+--     monitor addr
+--     -- setFlag TrapRemoteExceptions
+--     me <- self
+--     addr ◁ (0 :: Int, me)
+--     forever $ receive 
+--       [ Case $ \((n, a) :: (Int, Address)) -> do
+--                     liftIO . putStrLn $ "act2 got " ++ (show n) ++ " from " ++ (show a)
+--                     a ◁ (n+1, me)
+--       , Case $ \(e :: RemoteException) -> 
+--             liftIO . print $ "act2 received a remote exception: " ++ (show e)
+--       ]
+-- 
+-- act3 :: Address -> Actor
+-- act3 addr = do
+--     monitor addr
+--     setFlag TrapRemoteExceptions
+--     forever $ receive
+--       [ Case $ \(e :: RemoteException) -> 
+--             liftIO . print $ "act3 received a remote exception: " ++ (show e)
+--       ]
+-- 
+-- main = do
+--     addr1 <- spawn act1
+--     addr2 <- spawn (act2 addr1)
+--     spawn (act3 addr2)
+--     threadDelay 20000000
 -- @
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE ExistentialQuantification #-}
@@ -148,7 +174,17 @@ data Context = Ctxt
   , flags :: MVar Flags
   } deriving (Typeable)
 
-type Message = Dynamic
+newtype Message = Msg { unMsg :: Dynamic }
+    deriving (Typeable)
+
+instance Show Message where
+    show = show . unMsg
+
+toMsg :: Typeable a => a -> Message
+toMsg = Msg . toDyn
+
+fromMsg :: Typeable a => Message -> Maybe a
+fromMsg = fromDynamic . unMsg
 
 -- | The address of an actor, used to send messages 
 data Address = Addr 
@@ -172,7 +208,9 @@ type ActorM = ReaderT Context IO
 -- in the 'ActorM' monad, returning ()
 type Actor = ActorM ()
 
-data Handler = forall m . (Typeable m) => Handler (m -> ActorM ())
+data Handler = forall m . (Typeable m) 
+             => Case (m -> ActorM ())
+             |  Default (ActorM ())
 
 -- | Used to obtain an actor's own address inside the actor
 self :: ActorM Address
@@ -202,17 +240,18 @@ receiveWithTimeout n hs act = do
 
 rec :: Message -> [Handler] -> ActorM ()
 rec msg [] = liftIO . throwIO $ PatternMatchFail err where
-    err = "no handler for messages of type " ++ (show . typeOf $ msg)
-rec msg ((Handler hdl):hs) = case fromDynamic msg of
+    err = "no handler for messages of type " ++ (show msg)
+rec msg ((Case hdl):hs) = case fromMsg msg of
     Just m  -> hdl m
     Nothing -> rec msg hs
+rec msg ((Default act):_) = act
 
 
 -- | Sends a message from inside the 'ActorM' monad
 send :: Typeable m => Address -> m -> ActorM ()
 send addr msg = do
     let ch = chan . ctxt $ addr
-    liftIO . writeChan ch . toDyn $ msg
+    liftIO . writeChan ch . toMsg $ msg
 
 -- | Infix form of 'send'
 (◁) :: Typeable m => Address -> m -> ActorM ()
@@ -252,7 +291,7 @@ spawn' fs act = do
             trap <- withMVar rfs (return . isSetF TrapRemoteExceptions)
             if trap
                 then
-                    writeChan rch (toDyn ex)
+                    writeChan rch (toMsg ex)
                 else
                     throwTo (thId addr) ex
     ti <- forkIO wrap
