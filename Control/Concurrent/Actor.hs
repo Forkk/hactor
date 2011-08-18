@@ -8,11 +8,7 @@
 --
 -- This module implements Erlang-style actors 
 -- (what Erlang calls processes). It does not implement 
--- network distribution (yet?).
--- An actor is parametrised by the type of messages it 
--- receives and the type of messages it sends.
---
--- Here is an example:
+-- network distribution (yet?). Here is an example:
 --
 -- @
 --act1 :: Actor
