@@ -4,7 +4,7 @@
 -- License     :  BSD3
 -- Maintainer  :  alexander.the.average@gmail.com
 -- Stability   :  alpha
--- Portability :  GHC only
+-- Portability :  GHC only (requires throwTo)
 --
 -- This module implements Erlang-style actors 
 -- (what Erlang calls processes). It does not implement 
@@ -15,51 +15,51 @@
 -- Here is an example:
 --
 -- @
--- act1 :: Actor
--- act1 = do
---     me <- self
---     liftIO $ print "act1 started"
---     forever $ receive
---       [ Case $ \((n, a) :: (Int, Address)) ->
---             if n > 10000
---                 then do
---                     liftIO . throwIO $ NonTermination 
---                 else do
---                     liftIO . putStrLn $ "act1 got " ++ (show n) ++ " from " ++ (show a)
---                     a ◁ (n+1, me)
---       , Case $ \(e :: RemoteException) -> 
---             liftIO . print $ "act1 received a remote exception"
---       , Default $ liftIO . print $ "act1: received a malformed message"
---       ]
---     
--- act2 :: Address -> Actor
--- act2 addr = do
---     monitor addr
---     -- setFlag TrapRemoteExceptions
---     me <- self
---     addr ◁ (0 :: Int, me)
---     forever $ receive 
---       [ Case $ \((n, a) :: (Int, Address)) -> do
---                     liftIO . putStrLn $ "act2 got " ++ (show n) ++ " from " ++ (show a)
---                     a ◁ (n+1, me)
---       , Case $ \(e :: RemoteException) -> 
---             liftIO . print $ "act2 received a remote exception: " ++ (show e)
---       ]
--- 
--- act3 :: Address -> Actor
--- act3 addr = do
---     monitor addr
---     setFlag TrapRemoteExceptions
---     forever $ receive
---       [ Case $ \(e :: RemoteException) -> 
---             liftIO . print $ "act3 received a remote exception: " ++ (show e)
---       ]
--- 
--- main = do
---     addr1 <- spawn act1
---     addr2 <- spawn (act2 addr1)
---     spawn (act3 addr2)
---     threadDelay 20000000
+--act1 :: Actor
+--act1 = do
+--    me <- self
+--    liftIO $ print "act1 started"
+--    forever $ receive
+--      [ Case $ \((n, a) :: (Int, Address)) ->
+--            if n > 10000
+--                then do
+--                    liftIO . throwIO $ NonTermination 
+--                else do
+--                    liftIO . putStrLn $ "act1 got " ++ (show n) ++ " from " ++ (show a)
+--                    send a (n+1, me)
+--      , Case $ \(e :: RemoteException) -> 
+--            liftIO . print $ "act1 received a remote exception"
+--      , Default $ liftIO . print $ "act1: received a malformed message"
+--      ]
+--    
+--act2 :: Address -> Actor
+--act2 addr = do
+--    monitor addr
+--    -- setFlag TrapRemoteExceptions
+--    me <- self
+--    send addr (0 :: Int, me)
+--    forever $ receive 
+--      [ Case $ \((n, a) :: (Int, Address)) -> do
+--                    liftIO . putStrLn $ "act2 got " ++ (show n) ++ " from " ++ (show a)
+--                    send a (n+1, me)
+--      , Case $ \(e :: RemoteException) -> 
+--            liftIO . print $ "act2 received a remote exception: " ++ (show e)
+--      ]
+--
+--act3 :: Address -> Actor
+--act3 addr = do
+--    monitor addr
+--    setFlag TrapRemoteExceptions
+--    forever $ receive
+--      [ Case $ \(e :: RemoteException) -> 
+--            liftIO . print $ "act3 received a remote exception: " ++ (show e)
+--      ]
+--
+--main = do
+--    addr1 <- spawn act1
+--    addr2 <- spawn (act2 addr1)
+--    spawn (act3 addr2)
+--    threadDelay 20000000
 -- @
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE ExistentialQuantification #-}
