@@ -65,8 +65,8 @@ module Control.Concurrent.Actor (
   , Handler(..)
   , ActorM
   , Actor
-  , RemoteException
-  , ActorExitNormal
+  , MonitoringException
+  , ActorExit
   , Flag(..)
   -- * Actor actions
   , send
@@ -78,6 +78,8 @@ module Control.Concurrent.Actor (
   , spawn
   , monitor
   , link
+  , kill
+  , status
   , setFlag
   , clearFlag
   , toggleFlag
@@ -86,6 +88,7 @@ module Control.Concurrent.Actor (
 
 import Control.Concurrent 
   ( forkIO
+  , killThread
   , myThreadId
   , ThreadId
   )
@@ -110,6 +113,7 @@ import Control.Concurrent.MVar
   , modifyMVar_
   , withMVar
   )
+import GHC.Conc (ThreadStatus, threadStatus)
 import Control.Monad.Reader 
   ( ReaderT
   , runReaderT
@@ -135,18 +139,18 @@ import Data.Bits (
   )
 
 -- | Exception raised by an actor on exit
-data ActorExitNormal = ActorExitNormal deriving (Typeable, Show)
+data ActorExit = ActorExit deriving (Typeable, Show)
 
-instance Exception ActorExitNormal
+instance Exception ActorExit
 
-data RemoteException = RemoteException Address SomeException
+data MonitoringException = MonitoringException Address
   deriving (Typeable, Show)
 
 instance Exception RemoteException
 
 type Flags = Word64
 
-data Flag = TrapRemoteExceptions
+data Flag = TrapMonitoringExceptions
     deriving (Eq, Enum)
 
 defaultFlags :: [Flag]
@@ -264,27 +268,28 @@ spawn' fs act = do
     ls <- newMVar empty
     fl <- newMVar $ foldl (flip setF) 0x00 fs
     let cx = Ctxt ls ch fl
-    let orig = runReaderT act cx >> throwIO ActorExitNormal
-        wrap = orig `catches` [E.Handler remoteExH, E.Handler someExH]
-        remoteExH :: RemoteException -> IO ()
-        remoteExH e@(RemoteException a _) = do
+    let orig = runReaderT act cx >> throwIO ActorExit
+        wrap = orig `catches` [E.Handler monitorExH, E.Handler someExH]
+        monitorExH :: MonitoringException -> IO ()
+        monitorExH e@(MonitoringException a) = do
             modifyMVar_ ls (return . delete a)
             me  <- myThreadId 
-            let se = toException e
-            forward (RemoteException (Addr me cx) se)
+            forward (MonitorException (Addr me cx))
+            throwIO e
         someExH :: SomeException -> IO ()
         someExH e = do
             me  <- myThreadId
-            forward (RemoteException (Addr me cx) e)
-        forward :: RemoteException -> IO ()
+            forward (MonitoringException (Addr me cx))
+            throwIO e
+        forward :: MonitoringException -> IO ()
         forward ex = do
             lset <- withMVar ls return
             mapM_ (fwdaux ex) $ elems lset
-        fwdaux :: RemoteException -> Address -> IO ()
+        fwdaux :: MonitoringException -> Address -> IO ()
         fwdaux ex addr = do
             let rfs = flags . ctxt $ addr
                 rch = chan  . ctxt $ addr
-            trap <- withMVar rfs (return . isSetF TrapRemoteExceptions)
+            trap <- withMVar rfs (return . isSetF TrapMonitoringExceptions)
             if trap
                 then
                     writeChan rch (toMsg ex)
@@ -315,6 +320,14 @@ link addr = do
     monitor addr
     ls <- asks lSet
     liftIO $ modifyMVar_ ls (return . insert addr)
+
+-- | Kill the actor at the specified address
+kill :: Address -> ActorM ()
+kill = liftIO . killThread . thId
+
+-- | The current status of an actor
+status :: Address -> ActorM ThreadStatus
+status = liftIO . threadStatus . thId
 
 -- | Sets the specified flag in the actor's environment
 setFlag :: Flag -> ActorM ()
