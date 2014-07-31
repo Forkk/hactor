@@ -1,9 +1,9 @@
 -- |
 -- Module      :  Control.Concurrent.Actor
--- Copyright   :  (c) 2011 Alex Constandache
+-- Copyright   :  (c) 2014 Alex Constandache & Forkk
 -- License     :  BSD3
--- Maintainer  :  alexander.the.average@gmail.com
--- Stability   :  alpha
+-- Maintainer  :  forkk@forkk.net
+-- Stability   :  experimental
 -- Portability :  GHC only (requires throwTo)
 --
 -- This module implements Erlang-style actors 
@@ -352,3 +352,4 @@ testFlag :: Flag -> ActorM Bool
 testFlag flag = do 
     fs <- asks flags
     liftIO $ withMVar fs (return . isSetF flag)
+
