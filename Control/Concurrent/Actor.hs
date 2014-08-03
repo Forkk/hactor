@@ -65,17 +65,16 @@ module Control.Concurrent.Actor (
   , Handler(..)
   , ActorM
   , Actor
-  , MonitoringException
+  , ActorException
   , ActorExit
   , Flag(..)
   -- * Actor actions
   , send
-  , (◁)
-  , (▷)
   , self
   , receive
   , receiveWithTimeout
   , spawn
+  , runActor
   , monitor
   , link
   , kill
@@ -112,6 +111,7 @@ import Control.Concurrent.MVar
   , newMVar
   , modifyMVar_
   , withMVar
+  , readMVar
   )
 import GHC.Conc (ThreadStatus, threadStatus)
 import Control.Monad.Reader
@@ -143,14 +143,14 @@ data ActorExit = ActorExit deriving (Typeable, Show)
 
 instance Exception ActorExit
 
-data MonitoringException = MonitoringException Address
+data ActorException = ActorException Address SomeException
   deriving (Typeable, Show)
 
-instance Exception MonitoringException
+instance Exception ActorException
 
 type Flags = Word64
 
-data Flag = TrapMonitoringExceptions
+data Flag = TrapActorExceptions | RunOnCurrentThread
     deriving (Eq, Enum)
 
 defaultFlags :: [Flag]
@@ -168,10 +168,10 @@ toggleF = flip complementBit . fromEnum
 isSetF :: Flag -> Flags -> Bool
 isSetF = flip testBit . fromEnum
 
-data Context = Ctxt
-  { lSet  :: MVar (Set Address)
-  , chan  :: Chan Message
-  , flags :: MVar Flags
+data Context = Context
+  { ctxMonitors :: MVar (Set Address)
+  , ctxChan     :: Chan Message
+  , ctxFlags    :: MVar Flags
   } deriving (Typeable)
 
 newtype Message = Msg { unMsg :: Dynamic }
@@ -187,19 +187,19 @@ fromMsg :: Typeable a => Message -> Maybe a
 fromMsg = fromDynamic . unMsg
 
 -- | The address of an actor, used to send messages
-data Address = Addr
-  { thId  :: ThreadId
-  , ctxt  :: Context
+data Address = Address
+  { addrThread  :: ThreadId
+  , addrContext :: Context
   } deriving (Typeable)
 
 instance Show Address where
-    show (Addr ti _) = "Address(" ++ (show ti) ++ ")"
+    show (Address ti _) = "Address(" ++ (show ti) ++ ")"
 
 instance Eq Address where
-    addr1 == addr2 = (thId addr1) == (thId addr2)
+    addr1 == addr2 = (addrThread addr1) == (addrThread addr2)
 
 instance Ord Address where
-    addr1 `compare` addr2 = (thId addr1) `compare` (thId addr2)
+    addr1 `compare` addr2 = (addrThread addr1) `compare` (addrThread addr2)
 
 -- | The actor monad, just a reader monad on top of 'IO'.
 type ActorM = ReaderT Context IO
@@ -217,14 +217,14 @@ self :: ActorM Address
 self = do
     c <- ask
     i <- liftIO myThreadId
-    return $ Addr i c
+    return $ Address i c
 
 -- | Try to handle a message using a list of handlers.
 -- The first handler matching the type of the message
 -- is used.
 receive :: [Handler] -> ActorM ()
 receive hs = do
-    ch  <- asks chan
+    ch  <- asks ctxChan
     msg <- liftIO . readChan $ ch
     rec msg hs
 
@@ -232,7 +232,7 @@ receive hs = do
 -- amount of time and runs a default action
 receiveWithTimeout :: Int -> [Handler] -> ActorM () -> ActorM ()
 receiveWithTimeout n hs act = do
-    ch <- asks chan
+    ch <- asks ctxChan
     msg <- liftIO . timeout n . readChan $ ch
     case msg of
         Just m  -> rec m hs
@@ -250,57 +250,81 @@ rec _ ((Default act):_) = act
 -- | Sends a message from inside the 'ActorM' monad
 send :: Typeable m => Address -> m -> ActorM ()
 send addr msg = do
-    let ch = chan . ctxt $ addr
+    let ch = ctxChan . addrContext $ addr
     liftIO . writeChan ch . toMsg $ msg
 
--- | Infix form of 'send'
-(◁) :: Typeable m => Address -> m -> ActorM ()
-(◁) = send
-
--- | Infix form of 'send' with the arguments flipped
-(▷) :: Typeable m => m -> Address -> ActorM ()
-(▷) = flip send
-
--- | Spawns a new actor, with the given flags set
-spawn' :: [Flag] -> Actor -> IO Address
-spawn' fs act = do
-    ch <- liftIO newChan
-    ls <- newMVar empty
-    fl <- newMVar $ foldl (flip setF) 0x00 fs
-    let cx = Ctxt ls ch fl
-    let orig = runReaderT act cx >> throwIO ActorExit
-        wrap = orig `catches` [E.Handler monitorExH, E.Handler someExH]
-        monitorExH :: MonitoringException -> IO ()
-        monitorExH e@(MonitoringException a) = do
-            modifyMVar_ ls (return . delete a)
-            me  <- myThreadId
-            forward (MonitoringException (Addr me cx))
-            throwIO e
-        someExH :: SomeException -> IO ()
-        someExH e = do
-            me  <- myThreadId
-            forward (MonitoringException (Addr me cx))
-            throwIO e
-        forward :: MonitoringException -> IO ()
+-- FIXME: This is a big and complicated function. It would be a good idea to
+-- break it up into smaller parts.
+-- | Prepares the given actor monad to be run as an actor. Returns a tuple
+-- containing the actor's context and an IO action to run the actor.
+mkActor :: Actor -> [Flag] -> IO (IO (), Context)
+mkActor actor flagList = do
+    chan <- liftIO newChan
+    linkedActors <- newMVar empty
+    flags <- newMVar $ foldl (flip setF) 0x00 flagList
+    let context = Context linkedActors chan flags
+    -- An IO action which executes the actual actor.
+    let actorFunc = actorInternal `catches` [ E.Handler linkedHandler
+                                            , E.Handler exceptionHandler]
+    -- The internal IO action for the actor.
+    -- This will be wrapped by exception handlers.
+        actorInternal = runReaderT actor context
+    -- Linked exception handler. Catches exceptions from linked actors and
+    -- handles them appropriately.
+        linkedHandler :: ActorException -> IO ()
+        linkedHandler ex@(ActorException addr iex) = do
+            -- Remove the linked actor from our list.
+            modifyMVar_ linkedActors (return . delete addr)
+            me <- myThreadId
+            forward $ ActorException (Address me context) iex
+            throwIO ex
+    -- Exception handler. Catches all exceptions and forwards them to
+    -- monitoring actors.
+        exceptionHandler :: SomeException -> IO ()
+        exceptionHandler ex = do
+            me <- myThreadId
+            forward $ ActorException (Address me context) ex
+            throwIO ex
+    -- Exception forwarding function.
+    -- Takes an `ActorException` and forwards it to all actors monitoring the
+    -- current actor.
+        forward :: ActorException -> IO ()
         forward ex = do
-            lset <- withMVar ls return
-            mapM_ (fwdaux ex) $ elems lset
-        fwdaux :: MonitoringException -> Address -> IO ()
-        fwdaux ex addr = do
-            let rfs = flags . ctxt $ addr
-                rch = chan  . ctxt $ addr
-            trap <- withMVar rfs (return . isSetF TrapMonitoringExceptions)
+            linkedSet <- readMVar linkedActors
+            mapM_ (forwardTo ex) $ elems linkedSet
+    -- Forwards the given exception to the given actor.
+        forwardTo :: ActorException -> Address -> IO ()
+        forwardTo ex addr = do
+            let remoteFlags = ctxFlags . addrContext $ addr
+                remoteChan  = ctxChan  . addrContext $ addr
+            trap <- withMVar remoteFlags (return . isSetF TrapActorExceptions)
+            -- If the remote actor is trapping actor exceptions, send our
+            -- exception to it as a message. Otherwise, throw it to the actor's
+            -- thread.
             if trap
-                then
-                    writeChan rch (toMsg ex)
-                else
-                    throwTo (thId addr) ex
-    ti <- forkIO wrap
-    return $ Addr ti cx
+               then writeChan remoteChan $ toMsg ex
+               else throwTo (addrThread addr) ex
+    -- Return the context and the IO action.
+    return (actorFunc, context)
 
--- | Spawn a new actor with default flags
+
+-- | Spawn a new actor with default flags on a separate thread.
 spawn :: Actor -> IO Address
-spawn = spawn' defaultFlags
+spawn actor = do
+    (actorFunc, context) <- mkActor actor defaultFlags
+    -- Start the actor's thread.
+    threadId <- forkIO actorFunc
+    -- Return a handle.
+    return $ Address threadId context
+
+-- | Run the given actor with default flags on the current thread.
+-- This can be useful for your program's "main actor".
+runActor :: Actor -> IO ()
+runActor actor = do
+    -- Create the actor.
+    (actorFunc, _) <- mkActor actor defaultFlags
+    actorFunc
+
 
 -- | Monitors the actor at the specified address.
 -- If an exception is raised in the monitored actor's
@@ -311,45 +335,45 @@ spawn = spawn' defaultFlags
 monitor :: Address -> ActorM ()
 monitor addr = do
     me <- self
-    let ls = lSet . ctxt $ addr
-    liftIO $ modifyMVar_ ls (return . insert me)
+    let mons = ctxMonitors . addrContext $ addr
+    liftIO $ modifyMVar_ mons (return . insert me)
 
 -- | Like `monitor`, but bi-directional
 link :: Address -> ActorM ()
 link addr = do
     monitor addr
-    ls <- asks lSet
-    liftIO $ modifyMVar_ ls (return . insert addr)
+    mons <- asks ctxMonitors
+    liftIO $ modifyMVar_ mons (return . insert addr)
 
 -- | Kill the actor at the specified address
 kill :: Address -> ActorM ()
-kill = liftIO . killThread . thId
+kill = liftIO . killThread . addrThread
 
 -- | The current status of an actor
 status :: Address -> ActorM ThreadStatus
-status = liftIO . threadStatus . thId
+status = liftIO . threadStatus . addrThread
 
 -- | Sets the specified flag in the actor's environment
 setFlag :: Flag -> ActorM ()
 setFlag flag = do
-    fs <- asks flags
+    fs <- asks ctxFlags
     liftIO $ modifyMVar_ fs (return . setF flag)
 
 -- | Clears the specified flag in the actor's environment
 clearFlag :: Flag -> ActorM ()
 clearFlag flag = do
-    fs <- asks flags
+    fs <- asks ctxFlags
     liftIO $ modifyMVar_ fs (return . clearF flag)
 
 -- | Toggles the specified flag in the actor's environment
 toggleFlag :: Flag -> ActorM ()
 toggleFlag flag = do
-    fs <- asks flags
+    fs <- asks ctxFlags
     liftIO $ modifyMVar_ fs (return . toggleF flag)
 
 -- | Checks if the specified flag is set in the actor's environment
 testFlag :: Flag -> ActorM Bool
 testFlag flag = do
-    fs <- asks flags
+    fs <- asks ctxFlags
     liftIO $ withMVar fs (return . isSetF flag)
 
