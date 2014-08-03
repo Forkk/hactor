@@ -6,8 +6,8 @@
 -- Stability   :  experimental
 -- Portability :  GHC only (requires throwTo)
 --
--- This module implements Erlang-style actors 
--- (what Erlang calls processes). It does not implement 
+-- This module implements Erlang-style actors
+-- (what Erlang calls processes). It does not implement
 -- network distribution (yet?). Here is an example:
 --
 -- @
@@ -19,26 +19,26 @@
 --      [ Case $ \((n, a) :: (Int, Address)) ->
 --            if n > 10000
 --                then do
---                    liftIO . throwIO $ NonTermination 
+--                    liftIO . throwIO $ NonTermination
 --                else do
 --                    liftIO . putStrLn $ "act1 got " ++ (show n) ++ " from " ++ (show a)
 --                    send a (n+1, me)
---      , Case $ \(e :: RemoteException) -> 
+--      , Case $ \(e :: RemoteException) ->
 --            liftIO . print $ "act1 received a remote exception"
 --      , Default $ liftIO . print $ "act1: received a malformed message"
 --      ]
---    
+--
 --act2 :: Address -> Actor
 --act2 addr = do
 --    monitor addr
 --    -- setFlag TrapRemoteExceptions
 --    me <- self
 --    send addr (0 :: Int, me)
---    forever $ receive 
+--    forever $ receive
 --      [ Case $ \((n, a) :: (Int, Address)) -> do
 --                    liftIO . putStrLn $ "act2 got " ++ (show n) ++ " from " ++ (show a)
 --                    send a (n+1, me)
---      , Case $ \(e :: RemoteException) -> 
+--      , Case $ \(e :: RemoteException) ->
 --            liftIO . print $ "act2 received a remote exception: " ++ (show e)
 --      ]
 --
@@ -47,7 +47,7 @@
 --    monitor addr
 --    setFlag TrapRemoteExceptions
 --    forever $ receive
---      [ Case $ \(e :: RemoteException) -> 
+--      [ Case $ \(e :: RemoteException) ->
 --            liftIO . print $ "act3 received a remote exception: " ++ (show e)
 --      ]
 --
@@ -86,13 +86,13 @@ module Control.Concurrent.Actor (
   , testFlag
   ) where
 
-import Control.Concurrent 
+import Control.Concurrent
   ( forkIO
   , killThread
   , myThreadId
   , ThreadId
   )
-import Control.Exception 
+import Control.Exception
   ( Exception(..)
   , SomeException
   , catches
@@ -101,20 +101,20 @@ import Control.Exception
   , PatternMatchFail(..)
   )
 import qualified Control.Exception as E (Handler(..))
-import Control.Concurrent.Chan 
+import Control.Concurrent.Chan
   ( Chan
   , newChan
   , readChan
   , writeChan
   )
-import Control.Concurrent.MVar 
+import Control.Concurrent.MVar
   ( MVar
   , newMVar
   , modifyMVar_
   , withMVar
   )
 import GHC.Conc (ThreadStatus, threadStatus)
-import Control.Monad.Reader 
+import Control.Monad.Reader
   ( ReaderT
   , runReaderT
   , asks
@@ -123,7 +123,7 @@ import Control.Monad.Reader
   )
 import System.Timeout (timeout)
 import Data.Dynamic
-import Data.Set 
+import Data.Set
   ( Set
   , empty
   , insert
@@ -146,7 +146,7 @@ instance Exception ActorExit
 data MonitoringException = MonitoringException Address
   deriving (Typeable, Show)
 
-instance Exception RemoteException
+instance Exception MonitoringException
 
 type Flags = Word64
 
@@ -168,7 +168,7 @@ toggleF = flip complementBit . fromEnum
 isSetF :: Flag -> Flags -> Bool
 isSetF = flip testBit . fromEnum
 
-data Context = Ctxt 
+data Context = Ctxt
   { lSet  :: MVar (Set Address)
   , chan  :: Chan Message
   , flags :: MVar Flags
@@ -186,8 +186,8 @@ toMsg = Msg . toDyn
 fromMsg :: Typeable a => Message -> Maybe a
 fromMsg = fromDynamic . unMsg
 
--- | The address of an actor, used to send messages 
-data Address = Addr 
+-- | The address of an actor, used to send messages
+data Address = Addr
   { thId  :: ThreadId
   , ctxt  :: Context
   } deriving (Typeable)
@@ -202,13 +202,13 @@ instance Ord Address where
     addr1 `compare` addr2 = (thId addr1) `compare` (thId addr2)
 
 -- | The actor monad, just a reader monad on top of 'IO'.
-type ActorM = ReaderT Context IO 
+type ActorM = ReaderT Context IO
 
 -- | The type of an actor. It is just a monadic action
 -- in the 'ActorM' monad, returning ()
 type Actor = ActorM ()
 
-data Handler = forall m . (Typeable m) 
+data Handler = forall m . (Typeable m)
              => Case (m -> ActorM ())
              |  Default (ActorM ())
 
@@ -220,19 +220,19 @@ self = do
     return $ Addr i c
 
 -- | Try to handle a message using a list of handlers.
--- The first handler matching the type of the message 
+-- The first handler matching the type of the message
 -- is used.
 receive :: [Handler] -> ActorM ()
 receive hs = do
     ch  <- asks chan
-    msg <- liftIO . readChan $ ch 
+    msg <- liftIO . readChan $ ch
     rec msg hs
 
--- | Same as receive, but times out after a specified 
+-- | Same as receive, but times out after a specified
 -- amount of time and runs a default action
 receiveWithTimeout :: Int -> [Handler] -> ActorM () -> ActorM ()
-receiveWithTimeout n hs act = do 
-    ch <- asks chan 
+receiveWithTimeout n hs act = do
+    ch <- asks chan
     msg <- liftIO . timeout n . readChan $ ch
     case msg of
         Just m  -> rec m hs
@@ -244,7 +244,7 @@ rec msg [] = liftIO . throwIO $ PatternMatchFail err where
 rec msg ((Case hdl):hs) = case fromMsg msg of
     Just m  -> hdl m
     Nothing -> rec msg hs
-rec msg ((Default act):_) = act
+rec _ ((Default act):_) = act
 
 
 -- | Sends a message from inside the 'ActorM' monad
@@ -256,7 +256,7 @@ send addr msg = do
 -- | Infix form of 'send'
 (◁) :: Typeable m => Address -> m -> ActorM ()
 (◁) = send
-    
+
 -- | Infix form of 'send' with the arguments flipped
 (▷) :: Typeable m => m -> Address -> ActorM ()
 (▷) = flip send
@@ -273,8 +273,8 @@ spawn' fs act = do
         monitorExH :: MonitoringException -> IO ()
         monitorExH e@(MonitoringException a) = do
             modifyMVar_ ls (return . delete a)
-            me  <- myThreadId 
-            forward (MonitorException (Addr me cx))
+            me  <- myThreadId
+            forward (MonitoringException (Addr me cx))
             throwIO e
         someExH :: SomeException -> IO ()
         someExH e = do
@@ -300,11 +300,11 @@ spawn' fs act = do
 
 -- | Spawn a new actor with default flags
 spawn :: Actor -> IO Address
-spawn = spawn' defaultFlags 
+spawn = spawn' defaultFlags
 
 -- | Monitors the actor at the specified address.
--- If an exception is raised in the monitored actor's 
--- thread, it is wrapped in an 'ActorException' and 
+-- If an exception is raised in the monitored actor's
+-- thread, it is wrapped in an 'ActorException' and
 -- forwarded to the monitoring actor. If the monitored
 -- actor terminates, an 'ActorException' is raised in
 -- the monitoring Actor
@@ -349,7 +349,7 @@ toggleFlag flag = do
 
 -- | Checks if the specified flag is set in the actor's environment
 testFlag :: Flag -> ActorM Bool
-testFlag flag = do 
+testFlag flag = do
     fs <- asks flags
     liftIO $ withMVar fs (return . isSetF flag)
 
