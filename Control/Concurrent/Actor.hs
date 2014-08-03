@@ -150,7 +150,7 @@ instance Exception ActorException
 
 type Flags = Word64
 
-data Flag = TrapActorExceptions | RunOnCurrentThread
+data Flag = TrapActorExceptions
     deriving (Eq, Enum)
 
 defaultFlags :: [Flag]
