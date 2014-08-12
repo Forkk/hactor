@@ -53,6 +53,9 @@ import Control.Monad.Reader
 -- added in the future.
 class ActorMessage msg
 
+-- Allow actors that don't take messages.
+instance ActorMessage ()
+
 -- }}}
 
 -- {{{ Handle and context
