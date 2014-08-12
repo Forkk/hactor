@@ -8,7 +8,7 @@ name: hactor
 --       +-+------- breaking API changes
 --       | | +----- non-breaking API additions
 --       | | | +--- code changes with no API change
-version: 1.0.0.0
+version: 1.0.0.1
 
 -- A short (one-line) description of the package.
 synopsis: Lightweight Erlang-style actors for Haskell.

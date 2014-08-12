@@ -8,10 +8,10 @@
 --
 -- This module implements Erlang-style actors (what Erlang calls processes).
 --
--- @
 module Control.Concurrent.Actor
+    (
     -- * Types
-    ( ActorHandle
+      ActorHandle
     , ActorMessage
     , ActorM
     -- * Sending Messages
@@ -26,14 +26,6 @@ module Control.Concurrent.Actor
     -- * Getting Information
     , self
     , actorThread
-    -- , monitor
-    -- , link
-    -- , kill
-    -- , status
-    -- , setFlag
-    -- , clearFlag
-    -- , toggleFlag
-    -- , testFlag
     ) where
 
 import Control.Concurrent
