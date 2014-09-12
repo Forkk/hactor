@@ -20,6 +20,7 @@ module Control.Concurrent.Actor
     -- * Receiving Messages
     , receive
     , receiveMaybe
+    , receiveSTM
     -- * Spawning Actors
     , spawnActor
     , runActor
