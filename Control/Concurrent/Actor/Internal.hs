@@ -13,15 +13,17 @@ module Control.Concurrent.Actor.Internal
     -- * Types
       ActorHandle (..)
     , ActorMessage
+    , MonadActor
     , ActorM
     -- * Sending Messages
     , send
-    , sendIO
     -- * Receiving Messages
     , receive
     , receiveMaybe
     , receiveSTM
     -- * Spawning Actors
+    , runActorM
+    , wrapActor
     , spawnActor
     , runActor
     -- * Getting Information
@@ -34,9 +36,14 @@ module Control.Concurrent.Actor.Internal
     , getMailBox
     ) where
 
+import Control.Applicative
 import Control.Concurrent
 import Control.Concurrent.STM
+import Control.Monad.Base
 import Control.Monad.Reader
+import Control.Monad.Trans ()
+import Control.Monad.Trans.Control
+import Control.Monad.Trans.Resource
 
 
 -- {{{ Types
@@ -78,28 +85,67 @@ type MailBox msg = TChan msg
 
 -- }}}
 
+type MonadActorSuper m = (Functor m, Applicative m, Monad m, MonadIO m, MonadThrow m)
+
+-- | The `MonadActor` typeclass. This provides the `actorCtx` function, which
+-- all of the actor monad's functionality is based on.
+class (ActorMessage msg, MonadActorSuper m) =>
+      MonadActor msg m where
+    actorCtx :: m (ActorContext msg)
+
+
 -- | The base actor monad.
-type ActorM msg = ReaderT (ActorContext msg) IO
+newtype ActorM msg a = A { unA :: ReaderT (ActorContext msg) IO a }
+    deriving (Functor, Applicative, Monad, MonadIO, MonadThrow)
+
+-- {{{ MonadActor instances
+
+instance (ActorMessage msg) => MonadActor msg (ActorM msg) where
+    actorCtx = A $ ask
+
+instance (ActorMessage msg, MonadActor msg m, MonadTrans t,
+         MonadActorSuper (t m)) => MonadActor msg (t m) where
+    actorCtx = lift actorCtx
+
+-- }}}
+
+-- | Runs the given `ActorM` in the IO monad with the given context.
+runActorM :: (ActorMessage msg) => ActorM msg a -> ActorContext msg -> IO a
+runActorM act ctx = runReaderT (unA act) ctx
+
+-- {{{ Stupid MonadBase nonsense for MonadResource support.
+
+instance (ActorMessage msg) => MonadBase IO (ActorM msg) where
+    liftBase = A . liftBase
+
+instance (ActorMessage msg) => MonadBaseControl IO (ActorM msg) where
+    newtype StM (ActorM msg) a =
+        StMA { unStMA :: StM (ReaderT (ActorContext msg) IO) a }
+    liftBaseWith f = A . liftBaseWith $ \runInBase -> f $ liftM StMA . runInBase . unA
+    restoreM = A . restoreM . unStMA
+
+-- }}}
+
 
 -- {{{ Get info
 
 -- | Gets a handle to the current actor.
-self :: ActorMessage msg => ActorM msg (ActorHandle msg)
+self :: (ActorMessage msg, MonadActor msg m) => m (ActorHandle msg)
 self = do
-    context <- ask
+    context <- actorCtx
     thread <- liftIO $ myThreadId
     return $ ActorHandle context thread
 
 -- | Retrieves the mail box for the current actor.
 -- This is an internal function and may be dangerous. Use with caution.
-getMailBox :: ActorMessage msg => ActorM msg (MailBox msg)
-getMailBox = asks acMailBox
+getMailBox :: (ActorMessage msg, MonadActor msg m) => m (MailBox msg)
+getMailBox = acMailBox <$> actorCtx
 
 
 -- | Gets the internal context object for the current actor.
 -- This is an internal function and may be dangerous. Use with caution.
-getContext :: ActorMessage msg => ActorM msg (ActorContext msg)
-getContext = ask
+getContext :: (ActorMessage msg, MonadActor msg m) => m (ActorContext msg)
+getContext = actorCtx
 
 -- }}}
 
@@ -108,7 +154,7 @@ getContext = ask
 -- | Reads a message from the actor's mail box.
 -- If there are no messages, blocks until one is received. If you don't want
 -- this, use @receiveMaybe@ instead.
-receive :: ActorMessage msg => ActorM msg (msg)
+receive :: (ActorMessage msg, MonadActor msg m) => m (msg)
 receive = do
     chan <- getMailBox
     -- Read from the channel, retrying if there is nothing to read.
@@ -116,13 +162,13 @@ receive = do
 
 -- | Reads a message from the actor's mail box.
 -- If there are no messages, returns @Nothing@.
-receiveMaybe :: ActorMessage msg => ActorM msg (Maybe msg)
+receiveMaybe :: (ActorMessage msg, MonadActor msg m) => m (Maybe msg)
 receiveMaybe = do
     chan <- getMailBox
     liftIO $ atomically $ tryReadTChan chan
 
 -- | An @ActorM@ action which returns an @STM@ action to receive a message.
-receiveSTM :: ActorMessage msg => ActorM msg (STM msg)
+receiveSTM :: (ActorMessage msg, MonadActor msg m) => m (STM msg)
 receiveSTM = do
     chan <- getMailBox
     return $ readTChan chan
@@ -132,15 +178,9 @@ receiveSTM = do
 -- {{{ Sending
 
 -- | Sends a message to the given actor handle.
--- This is secretly just @sendIO@ lifted into an actor monad.
-send :: (ActorMessage msg, ActorMessage msg') =>
-        ActorHandle msg -> msg -> ActorM msg' ()
-send hand msg = liftIO $ sendIO hand msg
-
--- | Sends a message to the given actor handle from within the IO monad.
-sendIO :: ActorMessage msg => ActorHandle msg -> msg -> IO ()
-sendIO hand msg =
-    atomically $ writeTChan mailBox $ msg
+send :: (MonadIO m, ActorMessage msg) => ActorHandle msg -> msg -> m ()
+send hand msg =
+    liftIO $ atomically $ writeTChan mailBox $ msg
   where
     mailBox = handleMailBox hand
 
@@ -159,7 +199,7 @@ wrapActor actorAction = do
     chan <- atomically newTChan
     -- Next, create the context and run the ReaderT action.
     let context = ActorContext chan
-        ioAction = runReaderT actorAction context
+        ioAction = runActorM actorAction context
     -- Return the information.
     return (ioAction, context)
 

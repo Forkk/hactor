@@ -13,10 +13,10 @@ module Control.Concurrent.Actor
     -- * Types
       ActorHandle
     , ActorMessage
+    , MonadActor
     , ActorM
     -- * Sending Messages
     , send
-    , sendIO
     -- * Receiving Messages
     , receive
     , receiveMaybe
